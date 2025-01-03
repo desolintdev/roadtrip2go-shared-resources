@@ -1,8 +1,17 @@
 const mongoose = require('mongoose');
-const {DraftsStatuses, BOOKING_STATUSES} = require('./constants');
+const {DraftsStatuses, BOOKING_STATUSES, EVENT_STATUS} = require('./constants');
 const Schema = mongoose.Schema;
 const axios = require('axios');
 const config = require('config');
+const {
+  tripCreationStartedEvent,
+  tripCreationFailedEvent,
+} = require('./utils/postHogUtils');
+const {
+  getDraftParams,
+  prepareStopHotelEvent,
+  sendCreationSuccessEvents,
+} = require('./utils/draftsUtils');
 
 const draftQuerySchema = new Schema({
   _id: false,
@@ -35,6 +44,17 @@ const draftGuestsSchema = new Schema({
   },
 });
 
+const timersSchema = new Schema({
+  _id: false,
+  creationStartTime: {type: Date, default: null},
+  creationEndTime: {type: Date, default: null},
+  recheckRatesStartTime: {type: Date, default: null},
+  recheckRatesEndTime: {type: Date, default: null},
+  paymentInitializationTime: {type: Date, default: null},
+  bookingStartTime: {type: Date, default: null},
+  bookingEndTime: {type: Date, default: null},
+});
+
 const draftsSchema = new Schema(
   {
     internalBookingId: {
@@ -45,6 +65,7 @@ const draftsSchema = new Schema(
     productId: {
       type: mongoose.Types.ObjectId,
       required: true,
+      ref: 'Products',
     },
     checkIn: {
       type: String,
@@ -117,6 +138,14 @@ const draftsSchema = new Schema(
     },
     transactionId: {
       type: String,
+    },
+    timers: {
+      type: timersSchema, // Use the separate timers schema here
+      default: () => ({}), // Ensure timers object exists even if not explicitly set
+    },
+    eventStatus: {
+      type: String,
+      default: EVENT_STATUS.initialize.value,
     },
   },
   {timestamps: true, toObject: {virtuals: true}, toJSON: {virtuals: true}}
@@ -221,5 +250,100 @@ draftsSchema.virtual('cancellationDate').get(function () {
   }
   return cancellationDate;
 });
+
+function populateMiddlewareFn(next) {
+  this.populate(['productId']);
+  next();
+}
+
+draftsSchema.pre('save', populateMiddlewareFn);
+draftsSchema.pre('findOneAndUpdate', populateMiddlewareFn);
+
+// Handles events after a new draft document is created and saved
+async function handleEventAfterCreate(doc, next) {
+  // If trip creation start time is not already set, initialize it
+  if (!doc?.timers?.creationStartTime) {
+    const internalBookingId = doc?.internalBookingId || null;
+    const productTitle = doc?.productId?.title || null;
+    const draftId = doc?._id;
+
+    // Set trip creation start time to document creation time
+    doc.timers.creationStartTime = doc?.createdAt;
+
+    // Trigger the event indicating trip creation has started
+    tripCreationStartedEvent({
+      bookingId: internalBookingId,
+      draftId,
+      productTitle,
+    });
+
+    await doc.save();
+  }
+
+  next();
+}
+
+// Attach the event handler to the 'save' hook of the Draft schema
+draftsSchema.post('save', handleEventAfterCreate);
+
+// Processes updates to draft documents and triggers appropriate events
+async function processEventAfterUpdate(draftDocument, next) {
+  const updateDetails = this.getUpdate();
+
+  // Check if the draft is in the "initialize" status
+  const draftIsBeingGenerated =
+    draftDocument?.eventStatus === EVENT_STATUS.initialize.value;
+
+  if (draftIsBeingGenerated) {
+    const updatedFields = updateDetails.$set || {};
+
+    // Extract key draft-related parameters
+    const {
+      bookingId,
+      productTitle,
+      tripCreationStartTime,
+      draftId,
+      allResponsesReceived,
+    } = getDraftParams({draftDocument});
+
+    // Analyze updated fields for city, error codes, and check-in details
+    const {cityName, errorCode, hasError, checkInMonth} = prepareStopHotelEvent(
+      {
+        updatedFields,
+      }
+    );
+
+    // If an error is detected in the updated fields, trigger a failure event
+    if (hasError) {
+      tripCreationFailedEvent({
+        bookingId,
+        draftId,
+        productTitle,
+        city: cityName,
+        checkInMonth,
+        errorCode,
+      });
+      draftDocument.eventStatus = EVENT_STATUS.error.value; // Mark the draft with an error status
+    }
+
+    // If all required responses have been received, trigger success events
+    if (allResponsesReceived) {
+      sendCreationSuccessEvents({
+        draftDocument,
+        tripCreationStartTime,
+        bookingId,
+        draftId,
+        productTitle,
+      });
+    }
+
+    await draftDocument.save();
+  }
+
+  next();
+}
+
+// Attach the event handler to the 'findOneAndUpdate' hook of the Draft schema
+draftsSchema.post('findOneAndUpdate', processEventAfterUpdate);
 
 module.exports = mongoose.model('Drafts', draftsSchema);
