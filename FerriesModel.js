@@ -66,4 +66,4 @@ const ferrySchema = new Schema(
   {timestamps: true, toObject: {virtuals: true}, toJSON: {virtuals: true}}
 );
 
-module.exports = mongoose.model('Ferry', ferrySchema);
+module.exports = mongoose.model('Ferries', ferrySchema);

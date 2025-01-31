@@ -14,7 +14,7 @@ const stopsSchema = new Schema({
     type: String,
     required: true,
     trim: true,
-    minlength: [5, 'Description must be at least 5 characters long'],
+    minlength: [3, 'Description must be at least 5 characters long'],
     maxlength: [1000, 'Description cannot exceed 200 characters'],
   },
   images: {
@@ -28,14 +28,14 @@ const guidesSchema = new Schema(
       type: String,
       required: true,
       trim: true,
-      minlength: [5, 'Title must be at least 5 characters long'],
+      minlength: [3, 'Title must be at least 5 characters long'],
       maxlength: [100, 'Title cannot exceed 200 characters'],
     },
     description: {
       type: String,
       required: true,
       trim: true,
-      minlength: [20, 'Description must be at least 20 characters long'],
+      minlength: [3, 'Description must be at least 20 characters long'],
       maxlength: [1000, 'Description cannot exceed 10000 characters'],
     },
     stops: {
